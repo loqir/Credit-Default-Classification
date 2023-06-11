@@ -1,0 +1,220 @@
+---
+title: "Untitled"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r load packages}
+library("dplyr")
+library("leaps")
+library("Hmisc")
+library("corrplot")
+library("olsrr")
+library("e1071")
+library("linprog")
+library(nnet)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r reading data, echo=FALSE}
+data <- read.csv("card.csv",skip=1)
+head(data)
+summary(data)
+```
+
+## Data Pre-Processing
+```{r data pre-processing} 
+barplot(main = "plot of non-default and default customers", table(data$default.payment.next.month), ylim = c(0,25000))
+
+data$EDUCATION[data$EDUCATION == 5 | data$EDUCATION == 6] <- 0
+
+boxplot(data$LIMIT_BAL)
+data <- data %>% filter (LIMIT_BAL < 1000000)
+boxplot(data$AGE)
+
+data <- data %>% filter (BILL_AMT3 < 1500000)
+boxplot(cbind(data[2], data[13:24]), range =3, las = 2)
+boxplot(data[3:12], range =3, las = 2)
+
+data <- data %>% mutate(ageGroup = case_when(AGE < 40 ~ 1,
+                                             AGE > 60 ~ 3,
+                                             TRUE ~ 2))
+data <- subset(data, select = -c(6))
+
+numbers <- c(3:5)
+data[,numbers] <- lapply(data[,numbers] , factor)
+
+numbers2 <- c(2, 6:24)
+
+for (i in numbers2) {
+  data[i] <- (data[i] - min(data[i]))/(max(data[i]) - min(data[i]))
+}
+```
+
+```{r split into test and training}
+set.seed(1234)
+n = length(data$ID)
+index <- 1:nrow(data)
+testindex <- sample(index, trunc(n)/4)
+test.data <- data[testindex, ]   
+train.data <- data[-testindex, ]
+train.ans <- data[testindex, 25]
+test.ans <- data[-testindex, 25]
+```
+
+``` {r feature selection, fig.height = 15, fig.width = 15}
+res <- cor(as.matrix(data[,13:25]))
+corrplot(res, method = "number")
+
+model <- lm(default.payment.next.month ~ ., 
+            data = train.data)
+pvalueselection <- ols_step_both_p(model, details = TRUE)
+
+pvalueselection$model
+
+outbackward <- regsubsets(default.payment.next.month ~ .,
+                          data = train.data, method = "backward", nvmax = 13)
+
+summary(outbackward)
+
+outforward <-regsubsets(default.payment.next.month ~ ., 
+                        data = train.data, method = "forward", nvmax = 13)
+summary(outforward)
+```
+
+```{r filter data after feature selection}
+new.data <- subset(data, select = -c(1, 10, 11, 13, 14, 15, 16, 17, 20, 21, 23))
+new.data <- new.data %>% rename(train.class = default.payment.next.month)
+set.seed(1234)
+new.data
+n = length(new.data$SEX)
+nindex <- 1:nrow(new.data)
+testindex <- sample(index, trunc(n)/4)
+test.data <- new.data[testindex, ]   
+train.data <- new.data[-testindex, ]
+train.ans <- new.data[testindex, 25]
+test.ans <- new.data[-testindex, 25]
+train.class <- train.data$train.class
+test.class <- test.data$train.class
+```
+
+```{r svm}
+svm.model <- svm(train.class ~ ., data = train.data, type = "C-classification", kernel = "linear")
+
+svm.model
+svm.model$SV
+svm.model$index
+
+results_train <- predict(svm.model, train.data[,-13])
+
+results_test <- predict(svm.model, test.data[,-13] )
+length(as.vector(results_test))
+
+
+table(pred=results_train ,actual = train.data$train.class)
+table(pred=results_test ,actual = test.class)
+
+mean(results_train == train.data$train.class)
+mean(results_test == test.class)
+
+svm.crossmodel <- svm(train.class ~ . , data = new.data, cross = 10, type = "C-classification", kernel = "linear", cost=1)
+results<- predict(svm.crossmodel, new.data[,-13])
+table(pred=results, actual=new.data$train.class)
+mean(results == new.data$train.class)
+
+new.train.data = train.data
+new.test.data = test.data
+new.train.data <- new.train.data %>% rename(default.payment.next.month = train.class)
+new.test.data <- new.test.data %>% rename(default.payment.next.month = train.class)
+new.train.data$default.payment.next.month <- as.factor(new.train.data$default.payment.next.month)
+levels(new.train.data$default.payment.next.month) <- c("NonDefault", "Default")
+new.test.data$default.payment.next.month <- as.factor(new.test.data$default.payment.next.month)
+levels(new.test.data$default.payment.next.month) <- c("NonDefault", "Default")
+
+svm.weightedmodel <- svm(default.payment.next.month ~ . , data = new.train.data, cross = 10, type = "C-classification", kernel = "linear", cost = 1, class.weights = c(NonDefault = 0.3, Default = 0.7))
+results_weighted <- predict(svm.weightedmodel, new.test.data[,-13])
+table(pred = results_rice2, actual=new.test.data$default.payment.next.month)
+mean(results_weighted== new.test.data$default.payment.next.month)
+
+```
+
+``` {r logistic regression}
+lm <- glm(train.class ~ LIMIT_BAL + SEX + EDUCATION + MARRIAGE + PAY_0 + PAY_2 + PAY_3 + PAY_4 + BILL_AMT1 + PAY_AMT1 + PAY_AMT2 + PAY_AMT5 + ageGroup, data = train.data, family = "binomial")
+
+summary(lm)
+test.data1 <- test.data %>% mutate(predVal = predict(lm, test.data, type = 'response'))
+
+test.data1$predicted <- ifelse(test.data$predVal > 0.5, 1, 0)
+#View(test.data1)
+test.data1 <- test.data1 %>% mutate(TP = (predicted == 1 & train.class == 1))
+test.data1 <- test.data1 %>% mutate(TN = (predicted == 0 & train.class == 0))
+test.data1 <- test.data1 %>% mutate(FP = (predicted == 1 & train.class == 0))
+test.data1 <- test.data1 %>% mutate(FN = (predicted == 0 & train.class == 1))
+
+TP <- sum(test.data1$TP)
+TN <- sum(test.data1$TN)
+FP <- sum(test.data1$FP)
+FN <- sum(test.data1$FN)
+
+recall <- TP/(TP+FN)
+precision <- TP/(TP+FP)
+accuracy <- (TP+TN)/nrow(test.data)
+Fscore <- (2*recall*precision)/(precision+recall)
+
+```
+
+```{r nn}
+fmla <- as.formula("train.class ~ LIMIT_BAL + SEX + EDUCATION + MARRIAGE + PAY_0 + PAY_2 + PAY_3 + PAY_4 + BILL_AMT1 + PAY_AMT1 + PAY_AMT2 + PAY_AMT5 + ageGroup")
+set.seed(1234)
+nn <- nnet(fmla, data=train.data[,c(1:12, 14)], decay = 0.01, maxit=1000,size=6,entropy=TRUE)
+
+pred <- predict(nn,data=train.data[,c(1:12, 14)])
+table(train.class,apply(pred,1,which.is.max))
+
+train.binpred <-predict(nn,train.data[,c(1:12, 14)],type=c("class"))
+table(actual=train.class,predicted = train.binpred)
+
+mean(train.class == train.binpred)
+
+predtest <- predict(nn,newdata=test.data[, c(1:12, 14)],type=c("class"))
+test.class
+table(actual = test.class, predicted = predtest)
+mean(test.class == predtest)
+
+testacc <- NULL
+decayvalue <- NULL
+sizevalue <- NULL
+
+#for (Ndecay in seq(0.01,0.10, by = 0.01)) {
+ # for (Nsize in seq(3,15, by = 1)) {
+#  set.seed(1234)
+# nn <- nnet(fmla,data=train.data[,c(1:12,14)],size=Nsize,decay=Ndecay,entropy=TRUE,maxit=1000)
+#  test.binpred <-predict(nn,test.data[,c(1:12, 14)],type=c("class"))
+#  testacc <-append(testacc, mean(test.class == test.binpred))
+ # decayvalue <- append(decayvalue, Ndecay)
+  
+ # sizevalue <- append(sizevalue, Nsize)
+#  }
+#}
+#df <- as.data.frame(cbind(testacc, decayvalue, sizevalue))
+#sorteddf <- df[order(testacc),]
+
+# number of true positive = 640
+# number of false negative = 1024
+recall = 631/(631 + 1033)
+recall
+
+  ```
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
